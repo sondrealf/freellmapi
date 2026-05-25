@@ -227,10 +227,7 @@ function SortableModelRow({
           <span>Speed #{entry.speedRank}</span>
           {entry.rpmLimit && <span>{entry.rpmLimit} rpm</span>}
           {entry.rpdLimit && <span>{entry.rpdLimit} rpd</span>}
-          <span
-            title={entry.platform === 'github-copilot' ? multiplierTooltip(entry.multiplier, tier) : undefined}
-            className={entry.platform === 'github-copilot' && entry.multiplier ? 'cursor-help underline decoration-dotted underline-offset-4' : undefined}
-          >
+          <span title={entry.platform === 'github-copilot' ? multiplierTooltip(entry.multiplier, tier) : undefined}>
             {/^[~\d]/.test(entry.monthlyTokenBudget)
               ? `${entry.monthlyTokenBudget} tok/mo${
                   entry.platform === 'github-copilot' && tier
