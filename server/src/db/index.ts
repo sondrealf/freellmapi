@@ -51,6 +51,7 @@ export function initDb(dbPath?: string): Database.Database {
   migrateModelsV14(db);
   migrateModelsV15(db);
   migrateModelsV16(db);
+  migrateModelsV17(db);
   ensureUnifiedKey(db);
 
   console.log(`Database initialized at ${resolvedPath}`);
@@ -1314,6 +1315,56 @@ function migrateModelsV16(db: Database.Database) {
     setOne.run(2, orderedIds[1]);
     setOne.run(3, orderedIds[2]);
     setFlag.run();
+  });
+  apply();
+}
+
+/**
+ * V17 (May 2026): fix V16 fallout + relabel copilot budgets.
+ *
+ * Two repairs:
+ *  1. V16's `priority + 3` bump assumed every non-copilot row had
+ *     priority >= 1. In Sondre's DB, github/openai/gpt-5-mini sat at
+ *     priority 0 (probably inserted by a pre-V13 path that didn't
+ *     register it in fallback_config until later). After +3 it landed
+ *     at priority 3 — colliding with the copilot gpt-5.2-codex row.
+ *     Bump any non-copilot row still <= 3 to the next free slot.
+ *  2. The Student-quota budget strings (`Student (0x)` etc.) confused
+ *     the dashboard's token-usage bar — its budget parser pulled
+ *     `0.33` out of `Student (0.33x)` and rendered a microscopic float.
+ *     Replace all three with the literal string "Session capped" so
+ *     the UI can show them as-is instead of trying to quantify.
+ *
+ * Flag-gated on `copilot_priority_v17_applied`.
+ */
+function migrateModelsV17(db: Database.Database) {
+  const flag = db.prepare("SELECT value FROM settings WHERE key = 'copilot_priority_v17_applied'").get();
+  if (flag) return;
+
+  const apply = db.transaction(() => {
+    // 1) Fix priority collisions in the V16 reserved range.
+    const offenders = db.prepare(`
+      SELECT fc.id FROM fallback_config fc
+      JOIN models m ON m.id = fc.model_db_id
+      WHERE m.platform != 'github-copilot' AND fc.priority <= 3
+      ORDER BY fc.priority ASC, fc.id ASC
+    `).all() as { id: number }[];
+    if (offenders.length > 0) {
+      let nextPriority = (db.prepare('SELECT COALESCE(MAX(priority), 0) AS mx FROM fallback_config').get() as { mx: number }).mx;
+      const move = db.prepare('UPDATE fallback_config SET priority = ? WHERE id = ?');
+      for (const o of offenders) {
+        nextPriority += 1;
+        move.run(nextPriority, o.id);
+      }
+    }
+
+    // 2) Relabel copilot monthly_token_budget to "Session capped".
+    db.prepare(`
+      UPDATE models SET monthly_token_budget = 'Session capped'
+       WHERE platform = 'github-copilot'
+    `).run();
+
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('copilot_priority_v17_applied', '1')").run();
   });
   apply();
 }

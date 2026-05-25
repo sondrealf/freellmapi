@@ -81,11 +81,16 @@ function TokenUsageBar({ data }: { data: TokenUsageData }) {
 
   // Scale each model's segment proportionally so the colored portion of the
   // bar sums to `remaining`; the grey tail represents what's been used.
-  const modelsWithWidth = models.map(m => ({
-    ...m,
-    remainingTokens: totalBudget > 0 ? (m.budget / totalBudget) * remaining : 0,
-    widthPct: totalBudget > 0 ? (m.budget / totalBudget) * (remaining / totalBudget) * 100 : 0,
-  }))
+  // Models with budget=0 (e.g. github-copilot's "Session capped") can't be
+  // quantified and are dropped from the bar + legend rather than displayed
+  // as a tiny / zero-width slice that pollutes the layout.
+  const modelsWithWidth = models
+    .filter(m => m.budget > 0)
+    .map(m => ({
+      ...m,
+      remainingTokens: totalBudget > 0 ? (m.budget / totalBudget) * remaining : 0,
+      widthPct: totalBudget > 0 ? (m.budget / totalBudget) * (remaining / totalBudget) * 100 : 0,
+    }))
   const usedPct = totalBudget > 0 ? (totalUsed / totalBudget) * 100 : 0
 
   return (
@@ -188,7 +193,11 @@ function SortableModelRow({
           <span>Speed #{entry.speedRank}</span>
           {entry.rpmLimit && <span>{entry.rpmLimit} rpm</span>}
           {entry.rpdLimit && <span>{entry.rpdLimit} rpd</span>}
-          <span>{entry.monthlyTokenBudget} tok/mo</span>
+          <span>
+            {/^[~\d]/.test(entry.monthlyTokenBudget)
+              ? `${entry.monthlyTokenBudget} tok/mo`
+              : entry.monthlyTokenBudget}
+          </span>
         </div>
       </div>
       <Switch

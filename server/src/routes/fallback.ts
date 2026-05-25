@@ -88,7 +88,7 @@ fallbackRouter.put('/', (req: Request, res: Response) => {
 const SORT_PRESETS: Record<string, string> = {
   intelligence: 'm.intelligence_rank ASC',
   speed: 'm.speed_rank ASC',
-  budget: "CASE m.monthly_token_budget WHEN 'Student (0x)' THEN 1 WHEN 'Student (0.33x)' THEN 2 WHEN '~120M' THEN 3 WHEN '~50-100M' THEN 4 WHEN '~30M' THEN 5 WHEN '~18-45M' THEN 6 WHEN '~18M' THEN 7 WHEN '~15M' THEN 8 WHEN '~12M' THEN 9 WHEN 'Student (1x)' THEN 10 WHEN '~6M' THEN 11 WHEN '~5-10M' THEN 12 WHEN '~4M' THEN 13 ELSE 14 END ASC",
+  budget: "CASE m.monthly_token_budget WHEN 'Session capped' THEN 1 WHEN '~120M' THEN 2 WHEN '~50-100M' THEN 3 WHEN '~30M' THEN 4 WHEN '~18-45M' THEN 5 WHEN '~18M' THEN 6 WHEN '~15M' THEN 7 WHEN '~12M' THEN 8 WHEN '~6M' THEN 9 WHEN '~5-10M' THEN 10 WHEN '~4M' THEN 11 ELSE 12 END ASC",
 };
 
 fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
@@ -135,11 +135,16 @@ fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
     ORDER BY fc.priority ASC
   `).all() as { platform: string; model_id: string; display_name: string; monthly_token_budget: string; priority: number }[];
 
+  // Numeric budgets must end in M or K to be quantified — otherwise the
+  // regex would happily pull `0.33` out of `Student (0.33x)` and report
+  // a microscopic float as a token budget. Anything without an M/K
+  // suffix (e.g. "Session capped", "credits-based") returns 0 and is
+  // dropped from the token-usage bar instead of polluting the legend.
   function parseBudget(s: string): number {
-    const m = s.match(/~?([\d.]+)(?:-([\d.]+))?([MK])?/);
+    const m = s.match(/~?(\d+(?:\.\d+)?)(?:-(\d+(?:\.\d+)?))?([MK])\b/);
     if (!m) return 0;
     const high = parseFloat(m[2] ?? m[1]);
-    const unit = m[3] === 'M' ? 1_000_000 : m[3] === 'K' ? 1_000 : 1;
+    const unit = m[3] === 'M' ? 1_000_000 : 1_000;
     return high * unit;
   }
 
