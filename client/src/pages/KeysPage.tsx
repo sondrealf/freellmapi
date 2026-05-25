@@ -429,11 +429,35 @@ function CopilotDeviceFlow({ onDone }: { onDone: () => void }) {
     }
   }
 
-  const copyCode = () => {
+  const copyCode = async () => {
     if (!session) return
-    navigator.clipboard.writeText(session.userCode)
-    setCodeCopied(true)
-    setTimeout(() => setCodeCopied(false), 1500)
+    // navigator.clipboard.writeText requires a secure context; behavior is
+    // inconsistent across http://<lan-ip> hosts that aren't localhost. Fall
+    // back to a hidden-textarea + execCommand so the button still works
+    // when serving the dashboard from a Tailscale IP or non-secure origin.
+    let ok = false
+    if (window.isSecureContext && navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(session.userCode)
+        ok = true
+      } catch { /* fall through to legacy path */ }
+    }
+    if (!ok) {
+      const el = document.createElement('textarea')
+      el.value = session.userCode
+      el.style.position = 'fixed'
+      el.style.opacity = '0'
+      el.style.pointerEvents = 'none'
+      document.body.appendChild(el)
+      el.focus()
+      el.select()
+      try { ok = document.execCommand('copy') } catch { ok = false }
+      document.body.removeChild(el)
+    }
+    if (ok) {
+      setCodeCopied(true)
+      setTimeout(() => setCodeCopied(false), 1500)
+    }
   }
 
   const reset = () => {
@@ -472,7 +496,7 @@ function CopilotDeviceFlow({ onDone }: { onDone: () => void }) {
             </a>
             <span className="text-muted-foreground">2. Enter code</span>
             <div className="flex items-center gap-2">
-              <code className="font-mono text-base tracking-wider bg-muted px-3 py-1.5 rounded-md select-all">
+              <code className="font-mono text-sm tracking-wider bg-muted px-2.5 py-1 rounded-md select-all">
                 {session.userCode}
               </code>
               <Button variant="outline" size="sm" onClick={copyCode}>

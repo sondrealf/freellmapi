@@ -44,6 +44,11 @@ const USER_AGENT = 'GitHubCopilotChat/0.26.7';
 
 const RESPONSES_MODELS = new Set<string>([
   'gpt-5.2-codex',
+  // gpt-5.4-mini: integration plan listed it under /chat/completions but
+  // Copilot live-routes it to /responses with `unsupported_api_for_model`
+  // on /chat/completions. Verified 2026-05-25 by probe against a Student
+  // Pack session token.
+  'gpt-5.4-mini',
   // The plan lists more (gpt-5.1, gpt-5.3-codex, etc.) — left out of this
   // initial set per commander scope. Add ids here as they're enabled.
 ]);
