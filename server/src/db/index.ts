@@ -52,6 +52,7 @@ export function initDb(dbPath?: string): Database.Database {
   migrateModelsV15(db);
   migrateModelsV16Vision(db);
   migrateModelsV17IntelligenceTiers(db);
+  migrateModelsV18OpenCodeZen(db);
   ensureUnifiedKey(db);
 
   console.log(`Database initialized at ${resolvedPath}`);
@@ -1465,6 +1466,52 @@ function migrateModelsV17IntelligenceTiers(db: Database.Database) {
         OR LOWER(model_id) LIKE '%granite-4.0-h-micro%'
         OR LOWER(model_id) LIKE '%lfm-2.5-1.2b%'
     `).run();
+  });
+  apply();
+}
+
+// ── V18: OpenCode Zen provider (2026-06) ──
+// Adds the OpenCode Zen gateway (#128, originally contributed by @Aldo-f). Zen is
+// an OpenAI-compatible service whose paid models bill pay-as-you-go but which
+// also exposes a rotating set of *promotional* free models. Access is via a FREE
+// account key from https://opencode.ai/auth — no credit card; billing only
+// applies if you call paid models. We require that key like any other provider
+// (we do NOT use Zen's unauthenticated path).
+//
+// We seed only the four models the Zen docs explicitly label free — big-pickle,
+// deepseek-v4-flash-free, mimo-v2.5-free, nemotron-3-super-free. The live
+// /v1/models list also surfaces qwen3.6-plus-free and minimax-m3-free, but those
+// are NOT documented as free, so they're intentionally omitted (same "verified
+// only" bar as V12-V14). Tiers follow V17's bands (deepseek-v4-flash → Frontier,
+// nemotron-3-super → Large). Caveats per docs: promotional/limited-time, "trial
+// use only — not for production", and prompts/outputs may be used to improve the
+// models (NVIDIA logs Nemotron traffic). Conservative shared 20 RPM / 200 RPD,
+// matching the OpenRouter :free pool pattern. Idempotent (INSERT OR IGNORE +
+// fallback_config backfill), safe to re-run.
+function migrateModelsV18OpenCodeZen(db: Database.Database) {
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const additions: Array<[string, string, string, number, number, string, number | null, number | null, number | null, number | null, string, number | null]> = [
+    ['opencode', 'big-pickle',             'Big Pickle (OpenCode Zen, stealth)',     10, 4, 'Large',    20, 200, null, null, 'promo (trial)', 131072],
+    ['opencode', 'deepseek-v4-flash-free', 'DeepSeek V4 Flash Free (OpenCode Zen)',   4, 4, 'Frontier', 20, 200, null, null, 'promo (trial)', 131072],
+    ['opencode', 'mimo-v2.5-free',         'MiMo-V2.5 Free (OpenCode Zen)',          14, 4, 'Medium',   20, 200, null, null, 'promo (trial)', 131072],
+    ['opencode', 'nemotron-3-super-free',  'Nemotron 3 Super Free (OpenCode Zen)',   12, 4, 'Large',    20, 200, null, null, 'promo (trial)', 131072],
+  ];
+
+  const apply = db.transaction(() => {
+    for (const a of additions) insert.run(...a);
+    const missing = db.prepare(`
+      SELECT m.id FROM models m
+      LEFT JOIN fallback_config f ON m.id = f.model_db_id
+      WHERE f.id IS NULL ORDER BY m.intelligence_rank ASC
+    `).all() as { id: number }[];
+    if (missing.length > 0) {
+      const maxPriority = (db.prepare('SELECT COALESCE(MAX(priority), 0) AS mx FROM fallback_config').get() as { mx: number }).mx;
+      const addFb = db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)');
+      for (let i = 0; i < missing.length; i++) addFb.run(missing[i].id, maxPriority + i + 1);
+    }
   });
   apply();
 }
