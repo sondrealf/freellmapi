@@ -1450,7 +1450,10 @@ function ensureUnifiedKey(db: Database.Database) {
   if (!existing) {
     const key = `freellmapi-${crypto.randomBytes(24).toString('hex')}`;
     db.prepare("INSERT INTO settings (key, value) VALUES ('unified_api_key', ?)").run(key);
-    console.log(`\n  Your unified API key: ${key}\n`);
+    // P2 hygiene (2026-06-03): never print the full key — this banner put the
+    // live token into the PM2 log on first boot. Masked tail is enough to
+    // identify it; the full value is readable via the settings endpoint/DB.
+    console.log(`\n  Your unified API key was generated (freellmapi-...${key.slice(-4)}). Retrieve it via the settings endpoint.\n`);
   }
 }
 
