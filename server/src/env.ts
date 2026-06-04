@@ -17,5 +17,9 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 //    `src/index.ts` as the first statement (`import './env.js'`), and the
 //    project is ES modules — the module graph waits for env.ts to settle
 //    before index.ts runs the rest of its imports.
-const { loadInfisical } = await import(path.resolve(__dirname, '../../vault-fetch.mjs'));
-await loadInfisical({ paths: ['/infrastructure/freellmapi'] });
+try {
+  const { loadInfisical } = await import(path.resolve(__dirname, '../../vault-fetch.mjs'));
+  await loadInfisical({ paths: ['/infrastructure/freellmapi'] });
+} catch (err) {
+  console.warn('[env] vault overlay skipped (soft-fall):', err instanceof Error ? err.message : err);
+}
