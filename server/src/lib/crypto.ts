@@ -26,27 +26,86 @@ function parseHexKey(value: string, source: 'env' | 'db'): Buffer {
 }
 
 /**
+ * Canary: an existing api_keys blob MUST decrypt with the resolved key.
+ *
+ * The 2026-05-29 incident: a half-up-vault boot left ENCRYPTION_KEY unset,
+ * initEncryptionKey silently fell back to a stale first-boot DB key, and
+ * every provider-credential decrypt then failed for 4+ days behind a green
+ * /health (503 routing_error on every completion). Fail LOUD here instead:
+ * a key that cannot decrypt existing data is the wrong key, and refusing to
+ * boot is strictly better than serving 503s behind a healthy-looking probe.
+ *
+ * No-op on a fresh install (no encrypted blobs to validate against).
+ */
+function assertKeyDecryptsExistingData(db: Database.Database, key: Buffer, source: 'env' | 'db' | 'generated'): void {
+  // The api_keys table may not exist yet if init runs before migrations
+  // (or in minimal test DBs) — no table means no encrypted data to validate.
+  const tableExists = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='api_keys'",
+  ).get();
+  if (!tableExists) return;
+
+  const row = db.prepare(
+    "SELECT encrypted_key, iv, auth_tag FROM api_keys WHERE encrypted_key IS NOT NULL AND iv IS NOT NULL AND auth_tag IS NOT NULL LIMIT 1",
+  ).get() as { encrypted_key: string; iv: string; auth_tag: string } | undefined;
+  if (!row) return; // fresh install — nothing encrypted yet
+
+  try {
+    const decipher = crypto.createDecipheriv(ALGORITHM, key, Buffer.from(row.iv, 'hex'));
+    decipher.setAuthTag(Buffer.from(row.auth_tag, 'hex'));
+    decipher.update(row.encrypted_key, 'hex', 'utf8');
+    decipher.final('utf8'); // throws on auth-tag mismatch
+  } catch {
+    throw new Error(
+      `ENCRYPTION_KEY canary FAILED: the ${source} key cannot decrypt existing api_keys data ` +
+      `(AES-GCM auth-tag mismatch). The key does not match what the stored provider ` +
+      `credentials were encrypted under — refusing to boot rather than 503 every request ` +
+      `behind a green /health. Likely cause: the vault overlay returned empty/stale on a ` +
+      `degraded-vault boot and a wrong key was resolved from '${source}'. Restore the correct ` +
+      `ENCRYPTION_KEY (vault /infrastructure/freellmapi) before restarting.`,
+    );
+  }
+}
+
+/**
  * Initialize encryption key from env, DB, or generate a new one.
  * Must be called after DB is initialized.
+ *
+ * After resolving the key from any source, a canary test-decrypt
+ * (assertKeyDecryptsExistingData) guarantees the key actually matches the
+ * stored data before it is cached — no silent wrong-key fallback.
  */
 export function initEncryptionKey(db: Database.Database): void {
+  let key: Buffer;
+  let source: 'env' | 'db' | 'generated';
+
   // 1. Check env var
   const envKey = process.env.ENCRYPTION_KEY;
   if (envKey && envKey !== 'your-64-char-hex-key-here') {
-    cachedKey = parseHexKey(envKey, 'env');
-    return;
+    key = parseHexKey(envKey, 'env');
+    source = 'env';
+  } else {
+    // 2. Check DB for persisted key
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'encryption_key'").get() as { value: string } | undefined;
+    if (row) {
+      key = parseHexKey(row.value, 'db');
+      source = 'db';
+    } else {
+      // 3. First run: generate. Persist only AFTER the canary passes, so we
+      //    never write a fresh key over an install that already has blobs
+      //    encrypted under a different (lost) key.
+      key = crypto.randomBytes(KEY_BYTES);
+      source = 'generated';
+    }
   }
 
-  // 2. Check DB for persisted key
-  const row = db.prepare("SELECT value FROM settings WHERE key = 'encryption_key'").get() as { value: string } | undefined;
-  if (row) {
-    cachedKey = parseHexKey(row.value, 'db');
-    return;
-  }
+  // Fail loud if the resolved key cannot decrypt existing data.
+  assertKeyDecryptsExistingData(db, key, source);
 
-  // 3. Generate and persist
-  cachedKey = crypto.randomBytes(KEY_BYTES);
-  db.prepare("INSERT INTO settings (key, value) VALUES ('encryption_key', ?)").run(cachedKey.toString('hex'));
+  if (source === 'generated') {
+    db.prepare("INSERT INTO settings (key, value) VALUES ('encryption_key', ?)").run(key.toString('hex'));
+  }
+  cachedKey = key;
 }
 
 function getEncryptionKey(): Buffer {
