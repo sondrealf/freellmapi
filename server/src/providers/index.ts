@@ -64,10 +64,15 @@ register(new OpenAICompatProvider({
 // GitHub Models — OpenAI-compatible. Catalog uses `<publisher>/<model>` ids
 // (e.g. `openai/gpt-4.1`); the old Azure endpoint rejects that prefix with
 // "Unknown model", so route to the current models.github.ai endpoint.
+// maxTokensParam: the gpt-5 family on this endpoint hard-rejects `max_tokens`
+// (400 "Unsupported parameter ... use 'max_completion_tokens'", live
+// 2026-06-05); `max_completion_tokens` is the current OpenAI param and is
+// accepted across the GitHub Models catalog.
 register(new OpenAICompatProvider({
   platform: 'github',
   name: 'GitHub Models',
   baseUrl: 'https://models.github.ai/inference',
+  maxTokensParam: 'max_completion_tokens',
 }));
 
 // GitHub Copilot — separate provider from GitHub Models. Uses raw GitHub

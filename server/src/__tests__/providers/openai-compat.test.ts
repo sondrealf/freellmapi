@@ -48,6 +48,47 @@ describe('OpenAICompatProvider', () => {
     expect(capturedBody.messages[0].role).toBe('user');
   });
 
+  it('sends max_tokens by default and max_completion_tokens when configured (GitHub Models gpt-5 family)', async () => {
+    let capturedBody: any = null;
+    const okResponse = {
+      ok: true,
+      json: () => Promise.resolve({
+        id: 'test-id',
+        object: 'chat.completion',
+        created: 123,
+        model: 'test-model',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+    } as any;
+    vi.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      capturedBody = JSON.parse((init as any).body);
+      return okResponse;
+    });
+
+    // default: classic param
+    await provider.chatCompletion('k', [{ role: 'user', content: 'x' }], 'm', { max_tokens: 20 });
+    expect(capturedBody.max_tokens).toBe(20);
+    expect(capturedBody.max_completion_tokens).toBeUndefined();
+
+    // configured: translated param (live 2026-06-05 gpt-5-mini 400 fix)
+    const github = new OpenAICompatProvider({
+      platform: 'github',
+      name: 'GitHub Models',
+      baseUrl: 'https://models.github.ai/inference',
+      maxTokensParam: 'max_completion_tokens',
+    });
+    await github.chatCompletion('k', [{ role: 'user', content: 'x' }], 'openai/gpt-5-mini', { max_tokens: 20 });
+    expect(capturedBody.max_completion_tokens).toBe(20);
+    expect(capturedBody.max_tokens).toBeUndefined();
+
+    // streaming path uses the same translation
+    const gen = github.streamChatCompletion('k', [{ role: 'user', content: 'x' }], 'openai/gpt-5-mini', { max_tokens: 20 });
+    await gen.next().catch(() => {});
+    expect(capturedBody.max_completion_tokens).toBe(20);
+    expect(capturedBody.max_tokens).toBeUndefined();
+  });
+
   it('should pass tool-calling params through untouched', async () => {
     let capturedBody: any = null;
     vi.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {

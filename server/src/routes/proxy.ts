@@ -225,7 +225,20 @@ export function isRetryableError(err: any): boolean {
     // 404: model deprecated/removed upstream (e.g. OpenRouter's "no endpoints found"
     // for a model that's been pulled). Rotate to the next model in the chain —
     // setCooldown + the health checker will avoid this model on subsequent requests.
-    || msg.includes('404') || msg.includes('not found') || msg.includes('no endpoints found');
+    || msg.includes('404') || msg.includes('not found') || msg.includes('no endpoints found')
+    // Provider-specific incompatibility 400s. Requests are zod-validated
+    // against the OpenAI schema BEFORE routing, so a downstream 400 on a
+    // valid request is provider-specific by elimination — another model in
+    // the chain can serve it. Deliberately signature-scoped, NOT a blanket
+    // 400-retry (a genuinely unservable request must not burn the whole
+    // chain). Live trigger 2026-06-05: GitHub Models gpt-5-mini rejected
+    // `max_tokens` and freellmapi 502'd the client instead of advancing.
+    || msg.includes('unsupported parameter') || msg.includes('max_completion_tokens')
+    // Context-window overflow: model-specific by definition — the chain has
+    // models from 4k to 262k. (SambaNova phrasing: "maximum context length
+    // is 32768 tokens ... Please reduce the length".)
+    || msg.includes('maximum context length') || msg.includes('context_length_exceeded')
+    || msg.includes('context window');
 }
 
 proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {

@@ -53,4 +53,26 @@ describe('isRetryableError', () => {
       expect(isRetryableError(new Error('Invalid API key'))).toBe(false);
     });
   });
+
+  describe('provider-incompat 400s advance the chain (live 2026-06-05 gpt-5-mini regression)', () => {
+    it('unsupported-parameter 400s are retryable', () => {
+      expect(isRetryableError(new Error(
+        "GitHub Models API error 400: Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+      ))).toBe(true);
+      expect(isRetryableError(new Error('Unsupported parameter: temperature'))).toBe(true);
+    });
+
+    it('context-window overflow 400s are retryable (model-specific by definition)', () => {
+      expect(isRetryableError(new Error(
+        "SambaNova API error 400: This model's maximum context length is 32768 tokens. However, your messages resulted in 170661 tokens. Please reduce the length.",
+      ))).toBe(true);
+      expect(isRetryableError(new Error('context_length_exceeded'))).toBe(true);
+      expect(isRetryableError(new Error('input exceeds the context window of this model'))).toBe(true);
+    });
+
+    it('generic 400s without an incompat signature remain NOT retryable', () => {
+      expect(isRetryableError(new Error('400 Bad Request'))).toBe(false);
+      expect(isRetryableError(new Error('API error 400: messages must not be empty'))).toBe(false);
+    });
+  });
 });

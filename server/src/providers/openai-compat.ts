@@ -20,6 +20,12 @@ export class OpenAICompatProvider extends BaseProvider {
   /** Per-provider HTTP timeout override. Cloud APIs finish in ~15s; locally-hosted
    * inference (llama.cpp / vLLM on CPU) can take 30-120s for long prompts. Default 15000. */
   private readonly timeoutMs: number;
+  /** Which wire param carries the output-token cap. OpenAI deprecated
+   * `max_tokens` in favor of `max_completion_tokens`; GitHub Models' current
+   * gpt-5 family hard-rejects `max_tokens` with a 400 ("Unsupported
+   * parameter") — observed live 2026-06-05 against gpt-5-mini. Default stays
+   * `max_tokens` (what every other pool provider accepts). */
+  private readonly maxTokensParam: 'max_tokens' | 'max_completion_tokens';
 
   constructor(opts: {
     platform: Platform;
@@ -28,6 +34,7 @@ export class OpenAICompatProvider extends BaseProvider {
     extraHeaders?: Record<string, string>;
     validateUrl?: string;
     timeoutMs?: number;
+    maxTokensParam?: 'max_tokens' | 'max_completion_tokens';
   }) {
     super();
     this.platform = opts.platform;
@@ -36,6 +43,7 @@ export class OpenAICompatProvider extends BaseProvider {
     this.extraHeaders = opts.extraHeaders ?? {};
     this.validateUrl = opts.validateUrl;
     this.timeoutMs = opts.timeoutMs ?? 15000;
+    this.maxTokensParam = opts.maxTokensParam ?? 'max_tokens';
   }
 
   async chatCompletion(
@@ -55,7 +63,7 @@ export class OpenAICompatProvider extends BaseProvider {
         model: modelId,
         messages,
         temperature: options?.temperature,
-        max_tokens: options?.max_tokens,
+        [this.maxTokensParam]: options?.max_tokens,
         top_p: options?.top_p,
         tools: options?.tools,
         tool_choice: options?.tool_choice,
@@ -91,7 +99,7 @@ export class OpenAICompatProvider extends BaseProvider {
         model: modelId,
         messages,
         temperature: options?.temperature,
-        max_tokens: options?.max_tokens,
+        [this.maxTokensParam]: options?.max_tokens,
         top_p: options?.top_p,
         tools: options?.tools,
         tool_choice: options?.tool_choice,
