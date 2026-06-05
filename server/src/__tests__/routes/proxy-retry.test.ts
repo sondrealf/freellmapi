@@ -74,5 +74,9 @@ describe('isRetryableError', () => {
       expect(isRetryableError(new Error('400 Bad Request'))).toBe(false);
       expect(isRetryableError(new Error('API error 400: messages must not be empty'))).toBe(false);
     });
+
+    it("OpenRouter's house upstream-failure wrapper is retryable (owl-alpha dead-head outage, 2026-06-05)", () => {
+      expect(isRetryableError(new Error('OpenRouter API error 400: Provider returned error'))).toBe(true);
+    });
   });
 });

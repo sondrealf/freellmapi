@@ -238,7 +238,14 @@ export function isRetryableError(err: any): boolean {
     // models from 4k to 262k. (SambaNova phrasing: "maximum context length
     // is 32768 tokens ... Please reduce the length".)
     || msg.includes('maximum context length') || msg.includes('context_length_exceeded')
-    || msg.includes('context window');
+    || msg.includes('context window')
+    // OpenRouter's house wrapper for an upstream-provider failure. NOT a
+    // generic 400 — it is OR's own "the model behind this route broke"
+    // string, so another chain entry can serve the request. Live trigger
+    // 2026-06-05 ~12-16Z: owl-alpha (stealth model) went dead upstream while
+    // sitting at the chain head; every auto request fail-fasted to a client
+    // 502 until the row was disabled.
+    || msg.includes('provider returned error');
 }
 
 proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
