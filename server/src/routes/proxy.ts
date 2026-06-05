@@ -13,6 +13,11 @@ import {
   unmapChunkToolNames,
   completionDefect,
 } from '../lib/tool-names.js';
+import {
+  recordGenericFailure,
+  clearGenericFailures,
+  EVICTION_THRESHOLD,
+} from '../services/generic-failure-tracker.js';
 
 export const proxyRouter = Router();
 
@@ -316,6 +321,12 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   // conversation on every subsequent turn unless we sanitize here.
   const hasTools = (tools?.length ?? 0) > 0;
   const sanitized = sanitizeRequestToolNames(tools, messages, tool_choice);
+  // Identity of THIS request's payload for the cross-request dead-head
+  // eviction below — distinct hashes are what separate "provider is dead"
+  // (different payloads all fail) from "this payload is broken" (one payload
+  // retried). Messages dominate the payload; tools/params piggyback via
+  // message identity in practice.
+  const payloadHash = crypto.createHash('sha1').update(JSON.stringify(parsed.data.messages)).digest('hex');
   // Allowed set in the provider's (sanitized) namespace, for response
   // validation below. Null when the request offered no tools.
   const allowedToolNames = hasTools ? new Set(sanitized.tools!.map(t => t.function.name)) : null;
@@ -426,6 +437,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
 
           recordTokens(route.platform, route.modelId, route.keyId, estimatedInputTokens + totalOutputTokens);
           recordSuccess(route.modelDbId);
+          clearGenericFailures(route.platform, route.modelId);
           setStickyModel(messages, route.modelDbId);
           logRequest(route.platform, route.modelId, 'success', estimatedInputTokens, totalOutputTokens, Date.now() - start, null);
           return;
@@ -473,6 +485,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         const totalTokens = result.usage?.total_tokens ?? 0;
         recordTokens(route.platform, route.modelId, route.keyId, totalTokens);
         recordSuccess(route.modelDbId);
+        clearGenericFailures(route.platform, route.modelId);
         setStickyModel(messages, route.modelDbId);
 
         res.setHeader('X-Routed-Via', `${route.platform}/${route.modelId}`);
@@ -499,6 +512,23 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         recordRateLimitHit(route.modelDbId);
         lastError = err;
         console.log(`[Proxy] ${err.message.slice(0, 60)} from ${route.displayName}, falling back (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        continue;
+      }
+
+      // Cross-request dead-head eviction: a single generic error has no
+      // signal, but N of them from the SAME provider/model on DISTINCT
+      // payloads means the provider is the constant — cooldown and advance
+      // exactly like a 429. The Nth (triggering) request advances here and
+      // gets served; earlier ones below fail fast as before. See
+      // services/generic-failure-tracker.ts for the design + the owl-alpha
+      // outage that motivated it.
+      if (recordGenericFailure(route.platform, route.modelId, payloadHash)) {
+        const skipId = `${route.platform}:${route.modelId}:${route.keyId}`;
+        skipKeys.add(skipId);
+        setCooldown(route.platform, route.modelId, route.keyId, 120_000);
+        recordRateLimitHit(route.modelDbId);
+        lastError = err;
+        console.log(`[Proxy] Dead-head eviction: ${route.displayName} failed ${EVICTION_THRESHOLD} distinct payloads, cooling down and falling back (attempt ${attempt + 1}/${MAX_RETRIES})`);
         continue;
       }
 
