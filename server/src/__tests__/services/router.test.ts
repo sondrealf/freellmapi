@@ -12,6 +12,7 @@ describe('Router', () => {
   beforeEach(() => {
     const db = getDb();
     db.prepare('DELETE FROM api_keys').run();
+    db.prepare('UPDATE models SET supports_tools = 1').run();
     // Reset fallback order to intelligence ranking
     const models = db.prepare('SELECT id, intelligence_rank FROM models ORDER BY intelligence_rank ASC').all() as any[];
     const update = db.prepare('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?');
@@ -76,6 +77,30 @@ describe('Router', () => {
 
     const result = routeRequest();
     expect(result.platform).toBe('groq');
+  });
+
+  it('skips supports_tools=0 models for tool requests, but not for plain text', () => {
+    const db = getDb();
+
+    const googleKey = encrypt('test-google-key');
+    db.prepare(`
+      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run('google', 'test', googleKey.encrypted, googleKey.iv, googleKey.authTag, 'healthy', 1);
+
+    const groqKey = encrypt('test-groq-key');
+    db.prepare(`
+      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run('groq', 'test', groqKey.encrypted, groqKey.iv, groqKey.authTag, 'healthy', 1);
+
+    // Google would win on priority (see test above). Mark every google model
+    // tool-incapable: a tool request must fall through to groq, while a
+    // plain-text request still routes to google.
+    db.prepare("UPDATE models SET supports_tools = 0 WHERE platform = 'google'").run();
+
+    expect(routeRequest(1000, undefined, undefined, true).platform).toBe('groq');
+    expect(routeRequest(1000, undefined, undefined, false).platform).toBe('google');
   });
 
   it('should skip invalid keys', () => {

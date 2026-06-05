@@ -13,6 +13,7 @@ interface ModelRow {
   rpd_limit: number | null;
   tpm_limit: number | null;
   tpd_limit: number | null;
+  supports_tools: number;
 }
 
 interface KeyRow {
@@ -130,8 +131,12 @@ export function getAllPenalties(): Array<{ modelDbId: number; count: number; pen
  * @param estimatedTokens - estimated total tokens for rate limit check
  * @param skipKeys - set of "platform:modelId:keyId" to skip (failed on this request)
  * @param preferredModelDbId - try this model first (sticky session)
+ * @param requiresTools - request carries tool definitions; skip models with
+ *   supports_tools = 0 (axis 1 of the two-axis tool-routing filter — models
+ *   that can't return structured tool_calls must never see a tool request,
+ *   they reply with prose or garbage that poisons the client conversation)
  */
-export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, preferredModelDbId?: number): RouteResult {
+export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, preferredModelDbId?: number, requiresTools = false): RouteResult {
   const db = getDb();
 
   // Get fallback chain ordered by priority
@@ -162,6 +167,12 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // Get model details
     const model = db.prepare('SELECT * FROM models WHERE id = ? AND enabled = 1').get(entry.model_db_id) as ModelRow | undefined;
     if (!model) continue;
+
+    // Axis 1: tool-call capability. A tool request routed to a model that
+    // can't emit structured tool_calls fails in the worst possible way —
+    // not an error, but a prose/garbage reply that enters the client's
+    // conversation history.
+    if (requiresTools && model.supports_tools === 0) continue;
 
     // Check if we have a provider for this platform
     const provider = getProvider(model.platform as any);

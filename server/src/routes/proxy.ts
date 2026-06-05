@@ -7,6 +7,12 @@ import { routeRequest, recordRateLimitHit, recordSuccess, type RouteResult } fro
 import { recordRequest, recordTokens, setCooldown } from '../services/ratelimit.js';
 import { getDb, getUnifiedApiKey } from '../db/index.js';
 import { contentToString } from '../lib/content.js';
+import {
+  sanitizeRequestToolNames,
+  unmapResponseToolNames,
+  unmapChunkToolNames,
+  completionDefect,
+} from '../lib/tool-names.js';
 
 export const proxyRouter = Router();
 
@@ -281,6 +287,19 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     };
   });
 
+  // Two-axis tool routing, axis 2 (schema/name compatibility): rewrite every
+  // tool name in the request — definitions, history tool_calls, tool-message
+  // names, named tool_choice — to the strictest pattern any provider in the
+  // pool enforces, and remember the mapping so responses can be translated
+  // back. Free-tier models occasionally emit garbage tool names; once one is
+  // in the client's history, strict providers (Copilot) 400 the whole
+  // conversation on every subsequent turn unless we sanitize here.
+  const hasTools = (tools?.length ?? 0) > 0;
+  const sanitized = sanitizeRequestToolNames(tools, messages, tool_choice);
+  // Allowed set in the provider's (sanitized) namespace, for response
+  // validation below. Null when the request offered no tools.
+  const allowedToolNames = hasTools ? new Set(sanitized.tools!.map(t => t.function.name)) : null;
+
   // Token estimation is intentionally a heuristic (~4 chars per token). Used
   // for routing decisions (skip a model whose budget is too small) and for
   // streaming bookkeeping where the provider doesn't echo a final usage count.
@@ -329,7 +348,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     let route: RouteResult;
     try {
-      route = routeRequest(estimatedTotal, skipKeys.size > 0 ? skipKeys : undefined, preferredModel);
+      route = routeRequest(estimatedTotal, skipKeys.size > 0 ? skipKeys : undefined, preferredModel, hasTools);
     } catch (err: any) {
       // No more models available
       if (lastError) {
@@ -358,11 +377,12 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         let streamStarted = false;
         try {
           const gen = route.provider.streamChatCompletion(
-            route.apiKey, messages, route.modelId,
-            { temperature, max_tokens, top_p, tools, tool_choice, parallel_tool_calls, keyId: route.keyId },
+            route.apiKey, sanitized.messages, route.modelId,
+            { temperature, max_tokens, top_p, tools: sanitized.tools, tool_choice: sanitized.toolChoice, parallel_tool_calls, keyId: route.keyId },
           );
 
-          for await (const chunk of gen) {
+          for await (let chunk of gen) {
+            chunk = unmapChunkToolNames(chunk, sanitized.mapping);
             if (!streamStarted) {
               res.setHeader('Content-Type', 'text/event-stream');
               res.setHeader('Cache-Control', 'no-cache');
@@ -407,9 +427,28 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         }
       } else {
         const result = await route.provider.chatCompletion(
-          route.apiKey, messages, route.modelId,
-          { temperature, max_tokens, top_p, tools, tool_choice, parallel_tool_calls },
+          route.apiKey, sanitized.messages, route.modelId,
+          { temperature, max_tokens, top_p, tools: sanitized.tools, tool_choice: sanitized.toolChoice, parallel_tool_calls },
         );
+
+        // Validate the completion is actually usable before accepting it.
+        // Hallucinated tool names and empty completions are not transport
+        // errors — the provider said 200 — but passing them through poisons
+        // the client conversation (the broken tool_call gets re-sent in
+        // history forever). Treat like a retryable failure: cooldown,
+        // penalty, next model in the chain. Checked against the SANITIZED
+        // namespace, before un-mapping.
+        const defect = completionDefect(result, allowedToolNames);
+        if (defect) {
+          const skipId = `${route.platform}:${route.modelId}:${route.keyId}`;
+          skipKeys.add(skipId);
+          setCooldown(route.platform, route.modelId, route.keyId, 120_000);
+          recordRateLimitHit(route.modelDbId);
+          lastError = new Error(`unusable completion (${defect})`);
+          logRequest(route.platform, route.modelId, 'error', estimatedInputTokens, 0, Date.now() - start, `unusable completion: ${defect}`);
+          console.log(`[Proxy] Unusable completion (${defect}) from ${route.displayName}, falling back (attempt ${attempt + 1}/${MAX_RETRIES})`);
+          continue;
+        }
 
         const totalTokens = result.usage?.total_tokens ?? 0;
         recordTokens(route.platform, route.modelId, route.keyId, totalTokens);
@@ -418,7 +457,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
 
         res.setHeader('X-Routed-Via', `${route.platform}/${route.modelId}`);
         if (attempt > 0) res.setHeader('X-Fallback-Attempts', String(attempt));
-        res.json(result);
+        res.json(unmapResponseToolNames(result, sanitized.mapping));
 
         logRequest(
           route.platform, route.modelId, 'success',

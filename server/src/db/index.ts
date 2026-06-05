@@ -54,6 +54,7 @@ export function initDb(dbPath?: string): Database.Database {
   migrateModelsV17(db);
   migrateModelsV18(db);
   migrateModelsV19(db);
+  migrateModelsV20(db);
   ensureUnifiedKey(db);
 
   console.log(`Database initialized at ${resolvedPath}`);
@@ -1443,6 +1444,33 @@ function migrateModelsV19(db: Database.Database) {
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('copilot_priority_v19_applied', '1')").run();
   });
   apply();
+}
+
+/**
+ * V20 (June 2026): two-axis tool routing, axis 1 — per-model tool-call
+ * capability flag. `supports_tools = 0` means the router must never hand
+ * this model a request that carries tool definitions (the model replies
+ * with prose or malformed pseudo-tool-call text instead of structured
+ * tool_calls, which poisons the client's conversation history — observed
+ * live on free-tier models 2026-06-04).
+ *
+ * The catalog was curated tool-capable (V4/V13 additions were live-probed
+ * for structured tool_calls), so everything defaults to 1; the column is
+ * the structural lever for ops/health-probes to demote misbehaving models
+ * without disabling them for plain-text traffic.
+ */
+function migrateModelsV20(db: Database.Database) {
+  const flag = db.prepare("SELECT value FROM settings WHERE key = 'supports_tools_v20_applied'").get();
+  if (flag) return;
+
+  // ALTER TABLE ADD COLUMN is not idempotent in SQLite — check schema first.
+  const columns = db.prepare("PRAGMA table_info(models)").all() as { name: string }[];
+  const have = new Set(columns.map(c => c.name));
+  if (!have.has('supports_tools')) {
+    db.exec("ALTER TABLE models ADD COLUMN supports_tools INTEGER NOT NULL DEFAULT 1");
+  }
+
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('supports_tools_v20_applied', '1')").run();
 }
 
 function ensureUnifiedKey(db: Database.Database) {

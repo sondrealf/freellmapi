@@ -177,4 +177,173 @@ describe('Proxy tool-calling support', () => {
     expect(providerBody.messages[2].tool_call_id).toBe('call_weather_1');
     expect(body.choices[0].message.content).toContain('30C');
   });
+
+  it('sanitizes poisoned tool names in history and restores originals on the response', async () => {
+    // Live free-mode artifact (2026-06-04): a model emitted this as a tool
+    // name; once in history, pattern-strict providers 400 the conversation.
+    const POISON = 'Step 5 — Write daily memory:<longcat_tool_call>Bash';
+    const origFetch = global.fetch;
+    let providerBody: any = null;
+
+    vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
+      const urlStr = typeof url === 'string' ? url : url.toString();
+      if (urlStr.includes('api.groq.com/openai/v1/chat/completions')) {
+        providerBody = JSON.parse((init as any).body);
+        // Model calls the (sanitized) tool again — the proxy must translate
+        // the name back to the original before answering the client.
+        const sentName = providerBody.messages[1].tool_calls[0].function.name;
+        return {
+          ok: true,
+          json: () => Promise.resolve({
+            id: 'chatcmpl-poison',
+            object: 'chat.completion',
+            created: 123,
+            model: 'openai/gpt-oss-120b',
+            choices: [{
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [{
+                  id: 'call_again',
+                  type: 'function',
+                  function: { name: sentName, arguments: '{}' },
+                }],
+              },
+              finish_reason: 'tool_calls',
+            }],
+            usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
+          }),
+        } as any;
+      }
+      return origFetch(url, init);
+    });
+
+    const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
+      messages: [
+        { role: 'user', content: 'continue the checklist' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call_p1',
+            type: 'function',
+            function: { name: POISON, arguments: '{}' },
+          }],
+        },
+        { role: 'tool', tool_call_id: 'call_p1', content: 'done' },
+      ],
+      tools: [{
+        type: 'function',
+        function: { name: POISON, parameters: { type: 'object', properties: {} } },
+      }],
+    }, authHeaders());
+
+    expect(status).toBe(200);
+    // Provider never saw the poisoned name — everywhere it appeared.
+    const sentDefName = providerBody.tools[0].function.name;
+    const sentCallName = providerBody.messages[1].tool_calls[0].function.name;
+    expect(sentDefName).toMatch(/^[a-zA-Z_][a-zA-Z0-9_-]{0,63}$/);
+    expect(sentCallName).toBe(sentDefName);
+    // Client got the ORIGINAL name back.
+    expect(body.choices[0].message.tool_calls[0].function.name).toBe(POISON);
+  });
+
+  it('falls back when a provider hallucinates an unknown tool name', async () => {
+    const origFetch = global.fetch;
+    let calls = 0;
+
+    vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
+      const urlStr = typeof url === 'string' ? url : url.toString();
+      if (urlStr.includes('api.groq.com/openai/v1/chat/completions')) {
+        calls++;
+        const bad = calls === 1;
+        return {
+          ok: true,
+          json: () => Promise.resolve({
+            id: `chatcmpl-${calls}`,
+            object: 'chat.completion',
+            created: 123,
+            model: 'openai/gpt-oss-120b',
+            choices: [{
+              index: 0,
+              message: bad
+                ? {
+                  role: 'assistant',
+                  content: null,
+                  tool_calls: [{
+                    id: 'call_bad',
+                    type: 'function',
+                    function: { name: 'made_up_tool', arguments: '{}' },
+                  }],
+                }
+                : {
+                  role: 'assistant',
+                  content: null,
+                  tool_calls: [{
+                    id: 'call_good',
+                    type: 'function',
+                    function: { name: 'get_weather', arguments: '{"city":"Karachi"}' },
+                  }],
+                },
+              finish_reason: 'tool_calls',
+            }],
+            usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
+          }),
+        } as any;
+      }
+      return origFetch(url, init);
+    });
+
+    const { status, body, headers } = await request(app, 'POST', '/v1/chat/completions', {
+      messages: [{ role: 'user', content: 'Weather in Karachi?' }],
+      tools: [{
+        type: 'function',
+        function: { name: 'get_weather', parameters: { type: 'object', properties: {} } },
+      }],
+    }, authHeaders());
+
+    expect(status).toBe(200);
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(headers.get('x-fallback-attempts')).toBe('1');
+    expect(body.choices[0].message.tool_calls[0].function.name).toBe('get_weather');
+  });
+
+  it('falls back on empty completions (content:null, no tool_calls)', async () => {
+    const origFetch = global.fetch;
+    let calls = 0;
+
+    vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
+      const urlStr = typeof url === 'string' ? url : url.toString();
+      if (urlStr.includes('api.groq.com/openai/v1/chat/completions')) {
+        calls++;
+        return {
+          ok: true,
+          json: () => Promise.resolve({
+            id: `chatcmpl-${calls}`,
+            object: 'chat.completion',
+            created: 123,
+            model: 'openai/gpt-oss-120b',
+            choices: [{
+              index: 0,
+              message: calls === 1
+                ? { role: 'assistant', content: null }
+                : { role: 'assistant', content: 'It is 30C in Karachi.' },
+              finish_reason: calls === 1 ? 'length' : 'stop',
+            }],
+            usage: { prompt_tokens: 10, completion_tokens: 0, total_tokens: 10 },
+          }),
+        } as any;
+      }
+      return origFetch(url, init);
+    });
+
+    const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
+      messages: [{ role: 'user', content: 'Weather in Karachi?' }],
+    }, authHeaders());
+
+    expect(status).toBe(200);
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(body.choices[0].message.content).toContain('30C');
+  });
 });
